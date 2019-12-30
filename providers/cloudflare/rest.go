@@ -24,7 +24,7 @@ const (
 )
 
 // get list of domains for account. Cache so the ids can be looked up from domain name
-func (c *CloudflareApi) fetchDomainList() error {
+func (c *cloudflareApi) fetchDomainList() error {
 	c.domainIndex = map[string]string{}
 	c.nameservers = map[string][]string{}
 	page := 1
@@ -53,7 +53,7 @@ func (c *CloudflareApi) fetchDomainList() error {
 }
 
 // get all records for a domain
-func (c *CloudflareApi) getRecordsForDomain(id string, domain string) ([]*models.RecordConfig, error) {
+func (c *cloudflareApi) getRecordsForDomain(id string, domain string) ([]*models.RecordConfig, error) {
 	url := fmt.Sprintf(recordsURL, id)
 	page := 1
 	records := []*models.RecordConfig{}
@@ -81,7 +81,7 @@ func (c *CloudflareApi) getRecordsForDomain(id string, domain string) ([]*models
 }
 
 // create a correction to delete a record
-func (c *CloudflareApi) deleteRec(rec *cfRecord, domainID string) *models.Correction {
+func (c *cloudflareApi) deleteRec(rec *cfRecord, domainID string) *models.Correction {
 	return &models.Correction{
 		Msg: fmt.Sprintf("DELETE record: %s %s %d %s (id=%s)", rec.Name, rec.Type, rec.TTL, rec.Content, rec.ID),
 		F: func() error {
@@ -97,7 +97,7 @@ func (c *CloudflareApi) deleteRec(rec *cfRecord, domainID string) *models.Correc
 	}
 }
 
-func (c *CloudflareApi) createZone(domainName string) (string, error) {
+func (c *cloudflareApi) createZone(domainName string) (string, error) {
 	type createZone struct {
 		Name string `json:"name"`
 
@@ -168,7 +168,7 @@ func cfSshfpData(rec *models.RecordConfig) *cfRecData {
 	}
 }
 
-func (c *CloudflareApi) createRec(rec *models.RecordConfig, domainID string) []*models.Correction {
+func (c *cloudflareApi) createRec(rec *models.RecordConfig, domainID string) []*models.Correction {
 	type createRecord struct {
 		Name     string     `json:"name"`
 		Type     string     `json:"type"`
@@ -235,7 +235,7 @@ func (c *CloudflareApi) createRec(rec *models.RecordConfig, domainID string) []*
 	return arr
 }
 
-func (c *CloudflareApi) modifyRecord(domainID, recID string, proxied bool, rec *models.RecordConfig) error {
+func (c *cloudflareApi) modifyRecord(domainID, recID string, proxied bool, rec *models.RecordConfig) error {
 	if domainID == "" || recID == "" {
 		return errors.Errorf("cannot modify record if domain or record id are empty")
 	}
@@ -289,7 +289,7 @@ func (c *CloudflareApi) modifyRecord(domainID, recID string, proxied bool, rec *
 }
 
 // change universal ssl state
-func (c *CloudflareApi) changeUniversalSSL(domainID string, state bool) error {
+func (c *cloudflareApi) changeUniversalSSL(domainID string, state bool) error {
 	type setUniversalSSL struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -317,7 +317,7 @@ func (c *CloudflareApi) changeUniversalSSL(domainID string, state bool) error {
 }
 
 // change universal ssl state
-func (c *CloudflareApi) getUniversalSSL(domainID string) (bool, error) {
+func (c *cloudflareApi) getUniversalSSL(domainID string) (bool, error) {
 	type universalSSLResponse struct {
 		Success  bool          `json:"success"`
 		Errors   []interface{} `json:"errors"`
@@ -355,7 +355,7 @@ func handleActionResponse(resp *http.Response, err error) (id string, e error) {
 	return result.Result.ID, nil
 }
 
-func (c *CloudflareApi) setHeaders(req *http.Request) {
+func (c *cloudflareApi) setHeaders(req *http.Request) {
 	if len(c.ApiToken) > 0 {
 		req.Header.Set("Authorization", "Bearer "+c.ApiToken)
 	} else {
@@ -365,7 +365,7 @@ func (c *CloudflareApi) setHeaders(req *http.Request) {
 }
 
 // generic get handler. makes request and unmarshalls response to given interface
-func (c *CloudflareApi) get(endpoint string, target interface{}) error {
+func (c *cloudflareApi) get(endpoint string, target interface{}) error {
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return err
@@ -385,7 +385,7 @@ func (c *CloudflareApi) get(endpoint string, target interface{}) error {
 	return decoder.Decode(target)
 }
 
-func (c *CloudflareApi) getPageRules(id string, domain string) ([]*models.RecordConfig, error) {
+func (c *cloudflareApi) getPageRules(id string, domain string) ([]*models.RecordConfig, error) {
 	url := fmt.Sprintf(pageRulesURL, id)
 	data := pageRuleResponse{}
 	if err := c.get(url, &data); err != nil {
@@ -424,7 +424,7 @@ func (c *CloudflareApi) getPageRules(id string, domain string) ([]*models.Record
 	return recs, nil
 }
 
-func (c *CloudflareApi) deletePageRule(recordID, domainID string) error {
+func (c *cloudflareApi) deletePageRule(recordID, domainID string) error {
 	endpoint := fmt.Sprintf(singlePageRuleURL, domainID, recordID)
 	req, err := http.NewRequest("DELETE", endpoint, nil)
 	if err != nil {
@@ -435,19 +435,19 @@ func (c *CloudflareApi) deletePageRule(recordID, domainID string) error {
 	return err
 }
 
-func (c *CloudflareApi) updatePageRule(recordID, domainID string, target string) error {
+func (c *cloudflareApi) updatePageRule(recordID, domainID string, target string) error {
 	if err := c.deletePageRule(recordID, domainID); err != nil {
 		return err
 	}
 	return c.createPageRule(domainID, target)
 }
 
-func (c *CloudflareApi) createPageRule(domainID string, target string) error {
+func (c *cloudflareApi) createPageRule(domainID string, target string) error {
 	endpoint := fmt.Sprintf(pageRulesURL, domainID)
 	return c.sendPageRule(endpoint, "POST", target)
 }
 
-func (c *CloudflareApi) sendPageRule(endpoint, method string, data string) error {
+func (c *cloudflareApi) sendPageRule(endpoint, method string, data string) error {
 	// from to priority code
 	parts := strings.Split(data, ",")
 	priority, _ := strconv.Atoi(parts[2])

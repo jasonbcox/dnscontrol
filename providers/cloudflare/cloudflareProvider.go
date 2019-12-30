@@ -1,22 +1,5 @@
 package cloudflare
 
-import (
-	"encoding/json"
-	"fmt"
-	"log"
-	"net"
-	"strings"
-	"time"
-
-	"github.com/StackExchange/dnscontrol/models"
-	"github.com/StackExchange/dnscontrol/pkg/printer"
-	"github.com/StackExchange/dnscontrol/pkg/transform"
-	"github.com/StackExchange/dnscontrol/providers"
-	"github.com/StackExchange/dnscontrol/providers/diff"
-	"github.com/miekg/dns/dnsutil"
-	"github.com/pkg/errors"
-)
-
 /*
 
 Cloudflare API DNS provider:
@@ -37,6 +20,33 @@ Domain level metadata available:
    - ip_conversions
 */
 
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"strings"
+	"time"
+
+	"github.com/StackExchange/dnscontrol/models"
+	"github.com/StackExchange/dnscontrol/pkg/printer"
+	"github.com/StackExchange/dnscontrol/pkg/transform"
+	"github.com/StackExchange/dnscontrol/providers"
+	"github.com/StackExchange/dnscontrol/providers/diff"
+	"github.com/miekg/dns/dnsutil"
+	"github.com/pkg/errors"
+)
+
+// Section 1: Register this provider in the system.
+
+// init registers the provider to dnscontrol.
+func init() {
+	providers.RegisterDomainServiceProviderType("CLOUDFLAREAPI", newCloudflare, features)
+	providers.RegisterCustomRecordType("CF_REDIRECT", "CLOUDFLAREAPI", "")
+	providers.RegisterCustomRecordType("CF_TEMP_REDIRECT", "CLOUDFLAREAPI", "")
+}
+
+// features declares which features and options are available.
 var features = providers.DocumentationNotes{
 	providers.CanUseAlias:            providers.Can("CF automatically flattens CNAME records into A records dynamically"),
 	providers.CanUsePTR:              providers.Cannot(),
@@ -49,14 +59,10 @@ var features = providers.DocumentationNotes{
 	providers.DocOfficiallySupported: providers.Can(),
 }
 
-func init() {
-	providers.RegisterDomainServiceProviderType("CLOUDFLAREAPI", newCloudflare, features)
-	providers.RegisterCustomRecordType("CF_REDIRECT", "CLOUDFLAREAPI", "")
-	providers.RegisterCustomRecordType("CF_TEMP_REDIRECT", "CLOUDFLAREAPI", "")
-}
+// Section 2: Define the API client.
 
-// CloudflareApi is the handle for API calls.
-type CloudflareApi struct {
+// cloudflareApi is the API handle used to store any client-related state.
+type cloudflareApi struct {
 	ApiKey          string `json:"apikey"`
 	ApiToken        string `json:apitoken`
 	ApiUser         string `json:"apiuser"`
@@ -67,6 +73,57 @@ type CloudflareApi struct {
 	ipConversions   []transform.IpConversion
 	ignoredLabels   []string
 	manageRedirects bool
+}
+
+func newCloudflare(m map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
+	api := &cloudflareApi{}
+	api.ApiUser, api.ApiKey, api.ApiToken = m["apiuser"], m["apikey"], m["apitoken"]
+	// check api keys from creds json file
+	if api.ApiToken == "" && (api.ApiKey == "" || api.ApiUser == "") {
+		return nil, errors.Errorf("if cloudflare apitoken is not set, apikey and apiuser must be provided")
+	}
+	if api.ApiToken != "" && (api.ApiKey != "" || api.ApiUser != "") {
+		return nil, errors.Errorf("if cloudflare apitoken is set, apikey and apiuser should not be provided")
+	}
+
+	// Check account data if set
+	api.AccountID, api.AccountName = m["accountid"], m["accountname"]
+	if (api.AccountID != "" && api.AccountName == "") || (api.AccountID == "" && api.AccountName != "") {
+		return nil, errors.Errorf("either both cloudflare accountid and accountname must be provided or neither")
+	}
+
+	err := api.fetchDomainList()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(metadata) > 0 {
+		parsedMeta := &struct {
+			IPConversions   string   `json:"ip_conversions"`
+			IgnoredLabels   []string `json:"ignored_labels"`
+			ManageRedirects bool     `json:"manage_redirects"`
+		}{}
+		err := json.Unmarshal([]byte(metadata), parsedMeta)
+		if err != nil {
+			return nil, err
+		}
+		api.manageRedirects = parsedMeta.ManageRedirects
+		// ignored_labels:
+		for _, l := range parsedMeta.IgnoredLabels {
+			api.ignoredLabels = append(api.ignoredLabels, l)
+		}
+		if len(api.ignoredLabels) > 0 {
+			printer.Warnf("Cloudflare 'ignored_labels' configuration is deprecated and might be removed. Please use the IGNORE domain directive to achieve the same effect.\n")
+		}
+		// parse provider level metadata
+		if len(parsedMeta.IPConversions) > 0 {
+			api.ipConversions, err = transform.DecodeTransformTable(parsedMeta.IPConversions)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return api, nil
 }
 
 func labelMatches(label string, matches []string) bool {
@@ -80,7 +137,7 @@ func labelMatches(label string, matches []string) bool {
 }
 
 // GetNameservers returns the nameservers for a domain.
-func (c *CloudflareApi) GetNameservers(domain string) ([]*models.Nameserver, error) {
+func (c *cloudflareApi) GetNameservers(domain string) ([]*models.Nameserver, error) {
 	if c.domainIndex == nil {
 		if err := c.fetchDomainList(); err != nil {
 			return nil, err
@@ -94,7 +151,7 @@ func (c *CloudflareApi) GetNameservers(domain string) ([]*models.Nameserver, err
 }
 
 // GetDomainCorrections returns a list of corrections to update a domain.
-func (c *CloudflareApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
+func (c *cloudflareApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
 	if c.domainIndex == nil {
 		if err := c.fetchDomainList(); err != nil {
 			return nil, err
@@ -227,7 +284,7 @@ func checkNSModifications(dc *models.DomainConfig) {
 	dc.Records = newList
 }
 
-func (c *CloudflareApi) checkUniversalSSL(dc *models.DomainConfig, id string) (changed bool, newState bool, err error) {
+func (c *cloudflareApi) checkUniversalSSL(dc *models.DomainConfig, id string) (changed bool, newState bool, err error) {
 	expected_str := dc.Metadata[metaUniversalSSL]
 	if expected_str == "" {
 		return false, false, errors.Errorf("Metadata not set.")
@@ -266,7 +323,7 @@ func checkProxyVal(v string) (string, error) {
 	return v, nil
 }
 
-func (c *CloudflareApi) preprocessConfig(dc *models.DomainConfig) error {
+func (c *cloudflareApi) preprocessConfig(dc *models.DomainConfig) error {
 
 	// Determine the default proxy setting.
 	var defProxy string
@@ -367,57 +424,6 @@ func (c *CloudflareApi) preprocessConfig(dc *models.DomainConfig) error {
 	}
 
 	return nil
-}
-
-func newCloudflare(m map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
-	api := &CloudflareApi{}
-	api.ApiUser, api.ApiKey, api.ApiToken = m["apiuser"], m["apikey"], m["apitoken"]
-	// check api keys from creds json file
-	if api.ApiToken == "" && (api.ApiKey == "" || api.ApiUser == "") {
-		return nil, errors.Errorf("if cloudflare apitoken is not set, apikey and apiuser must be provided")
-	}
-	if api.ApiToken != "" && (api.ApiKey != "" || api.ApiUser != "") {
-		return nil, errors.Errorf("if cloudflare apitoken is set, apikey and apiuser should not be provided")
-	}
-
-	// Check account data if set
-	api.AccountID, api.AccountName = m["accountid"], m["accountname"]
-	if (api.AccountID != "" && api.AccountName == "") || (api.AccountID == "" && api.AccountName != "") {
-		return nil, errors.Errorf("either both cloudflare accountid and accountname must be provided or neither")
-	}
-
-	err := api.fetchDomainList()
-	if err != nil {
-		return nil, err
-	}
-
-	if len(metadata) > 0 {
-		parsedMeta := &struct {
-			IPConversions   string   `json:"ip_conversions"`
-			IgnoredLabels   []string `json:"ignored_labels"`
-			ManageRedirects bool     `json:"manage_redirects"`
-		}{}
-		err := json.Unmarshal([]byte(metadata), parsedMeta)
-		if err != nil {
-			return nil, err
-		}
-		api.manageRedirects = parsedMeta.ManageRedirects
-		// ignored_labels:
-		for _, l := range parsedMeta.IgnoredLabels {
-			api.ignoredLabels = append(api.ignoredLabels, l)
-		}
-		if len(api.ignoredLabels) > 0 {
-			printer.Warnf("Cloudflare 'ignored_labels' configuration is deprecated and might be removed. Please use the IGNORE domain directive to achieve the same effect.\n")
-		}
-		// parse provider level metadata
-		if len(parsedMeta.IPConversions) > 0 {
-			api.ipConversions, err = transform.DecodeTransformTable(parsedMeta.IPConversions)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	return api, nil
 }
 
 // Used on the "existing" records.
@@ -564,7 +570,7 @@ func getProxyMetadata(r *models.RecordConfig) map[string]string {
 }
 
 // EnsureDomainExists returns an error of domain does not exist.
-func (c *CloudflareApi) EnsureDomainExists(domain string) error {
+func (c *cloudflareApi) EnsureDomainExists(domain string) error {
 	if _, ok := c.domainIndex[domain]; ok {
 		return nil
 	}
